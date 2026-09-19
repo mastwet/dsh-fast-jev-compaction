@@ -1,0 +1,38 @@
+# dsh-compaction-jev bundle patch: replace the host-plane compaction backend.
+#
+# A patch entry targets a row by id and REPLACES that row's whole `config`.
+# `name` in a patch entry is a guard, not an override: it must match the row's
+# current name or the patch is skipped with a warning. So the default backend is
+# disabled, and this backend is inserted as its own row.
+#
+# Wiring for a profile whose compaction row lives in the composition:
+#
+#   dsh plugin --profile <name> add <path-to-this-package>
+#
+# The `/compact` command and the tool-result pruner resolve whichever
+# `compaction` service their realm provides, so neither needs an entry here.
+#
+# A Web deployment composes compaction inside an agent preset's isolated group
+# instead (the shipped `dsh-web-app` layer disables the host-plane row), so
+# there the wiring point is a user-owned preset copy. See README.md.
+
+- id: compaction-basic
+  disabled: true
+
+- insert:
+    - id: compaction-jev
+      name: dsh-compaction-jev
+      config:
+        # The credential is never a config value; this names the environment
+        # variable that holds it.
+        apiKeyEnv: TYPESAFE_API_KEY
+        model: jev-latest
+        # A minimum share of the region must be released before the verbatim
+        # checkpoint is used; below it the backend falls back to the built-in
+        # model summary. Raise it to prefer summaries, lower it to accept
+        # smaller reductions.
+        minReductionRatio: 0.25
+        # Minimum Jev probability for a call or a result to stay.
+        keepThreshold: 0.5
+        # Newest region messages never scored; the first is always pinned.
+        preserveRecentMessages: 6

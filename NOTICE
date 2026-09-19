@@ -1,0 +1,113 @@
+# NOTICE
+
+`dsh-compaction-jev` is an independent DeepSeek Harness plugin. It ports the
+decision algorithm of a separately published project and reuses a DeepSeek
+Harness package as its base. Both are recorded here.
+
+## Ported from `fast-jev-compaction`
+
+The decision plan in `src/jev/` and the checkpoint rendering in `src/surface.ts`
+are a TypeScript port of **`fast-jev-compaction`** v0.2.0
+(<https://github.com/tamaratran/fast-jev-compaction>), which is distributed
+under the MIT License, Copyright (c) 2025. That license text is reproduced
+verbatim under "Third-party license text" below.
+
+The upstream project is a Claude Code plugin; its decision core is reached only
+through Claude Code hook entry points. That package is **not published to npm**
+(`npm view fast-jev-compaction` returns 404) and carries no `prepare` script, so
+its TypeScript sources cannot be installed as a dependency — a `github:` install
+would fetch sources with no build output. The algorithm is therefore ported
+rather than depended on.
+
+### What was ported
+
+| Upstream source | This package |
+| --- | --- |
+| `src/types.ts`, `src/request.ts`, `src/client.ts` | `src/jev/protocol.ts` |
+| `src/types.ts` (token estimator), `src/compact.ts` (truncation) | `src/jev/tokens.ts` |
+| `src/state.ts`, `src/compact.ts` | `src/jev/plan.ts` |
+| the hook's transcript→state projection and its output template | `src/surface.ts` |
+
+Ported unchanged in behavior: the token estimator's word/digit/symbol pricing;
+the tool-call pairing by `tool_use_id` and the pinned head/tail rule; the two
+`noul` questions per candidate call (`keepCall`, `keepResult`); the
+`keepThreshold` decision order (keep → drop result → drop call); the staged
+state fitting and its stage order; the request batching arithmetic; every
+default (`keepThreshold` 0.5, `preserveRecentMessages` 6, `maxStateTokens`
+25000, `maxRequestTokens` 30000, `truncateHeadChars` 300, `reductionRatio`
+0.25, model `jev-latest`); and the fall back to the built-in summary when the
+reduction is too small, a credential is missing, or the request fails.
+
+### What changed
+
+- **Host, not hook.** Upstream is a Claude Code plugin driven by hook payloads.
+  This package replaces the `summarize()` hook of the DeepSeek Harness
+  `BasicCompactionEngine`, so DSH's own trigger policy, retention, range
+  selection, locking, event bracket, and durability are inherited unchanged
+  instead of being reimplemented.
+- **Type names and field spelling.** Transcript types are camel-cased for DSH
+  (`toolUses`, `toolResults`, `toolCallId`). The state sent to Jev deliberately
+  keeps upstream's wire spelling (`i`, `role`, `text`, `tool_calls`, `id`,
+  `tool`, `input`, `result`) because it is a request body, not an internal type.
+- **The `noul` question variant only.** Upstream also models a `choice` question
+  variant. This port carries only `noul`, which is what its plan emits, and
+  drops the rest as unused.
+- **Checkpoint template.** The rendered summary is a DSH checkpoint: one text
+  block per retained message with `--- user ---` / `--- assistant ---` markers,
+  verbatim tool inputs and retained results, and a leading ledger line that
+  names the decision counts and the fit stage. Upstream's Claude Code
+  transcript template is not reused.
+- **Short results are kept whole.** Upstream truncates a released result to
+  `truncateHeadChars` unconditionally. This port leaves a result shorter than
+  the head cap plus its note intact, because truncating it would lose content
+  while saving nothing; the ledger still counts it as released.
+- **One request in flight per batch, all batches in parallel.** Upstream asks
+  its batches sequentially; this port issues the batch requests concurrently and
+  merges their answers, which shortens compaction latency at the same token
+  cost.
+- **No `choice`-question parsing, no hook loader, no `dist` build.** Loading,
+  `.claude-plugin/`, and the Claude Code hook entry points are not ported.
+
+## Built on DeepSeek Harness packages
+
+`JevCompactionEngine` extends `BasicCompactionEngine` from
+`@deepseek-ai/dsh-compaction-basic`, and is composed as the `ctx.compaction`
+service defined by `@deepseek-ai/dsh-compaction`. Those packages are consumed as
+dependencies under their own licenses; no DeepSeek Harness source is copied or
+modified by this package.
+
+## Third-party license text
+
+`fast-jev-compaction` v0.2.0, the source of the ported decision algorithm, is
+distributed under the following terms. Its copyright notice is preserved here
+because the port incorporates its code.
+
+```text
+MIT License
+
+Copyright (c) 2025
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## License scope
+
+This package is MIT, Copyright (c) 2026 大湿. See `LICENSE`. Where it is
+distributed inside another project, that project's own license governs the
+combined distribution.

@@ -1,0 +1,68 @@
+{
+  "name": "dsh-compaction-jev",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness compaction backend that keeps history verbatim: Jev (TypeSafe System One) scores every tool call and result, stale ones are dropped, everything kept stays byte-for-byte. Falls back to the built-in summary when Jev is unavailable or removes too little.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "preset",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "compaction",
+    "context",
+    "jev",
+    "typesafe"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-compaction": "*",
+    "@deepseek-ai/dsh-compaction-basic": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-token-meter": "*",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-agent": "0.1.6-alpha.1",
+    "@deepseek-ai/dsh-compaction": "0.1.6-alpha.1",
+    "@deepseek-ai/dsh-compaction-basic": "0.1.6-alpha.1",
+    "@deepseek-ai/dsh-llm": "0.1.6-alpha.1",
+    "@deepseek-ai/dsh-token-meter": "0.1.6-alpha.1",
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

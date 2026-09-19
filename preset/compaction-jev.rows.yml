@@ -1,0 +1,38 @@
+# The compaction rows for a user-owned agent preset, for a Web deployment whose
+# compaction backend lives inside the preset's isolated group.
+#
+# Presets are copy-only: there is no patch layer that expresses "the standard
+# preset plus one change". Author a preset copy, then replace its `compaction`
+# group's rows with these. The rest of the copied composition is unchanged.
+#
+#   dsh> ctx.agentPresets.copy('standard', 'jev')   # or copy the directory by hand
+#   # edit <the copy>/agent.cordis.yml
+#
+# Everything before the group row is the shipped assembly; only the two backend
+# rows inside it change.
+
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-jev
+      name: dsh-compaction-jev
+      config:
+        apiKeyEnv: TYPESAFE_API_KEY
+        model: jev-latest
+        minReductionRatio: 0.25
+        keepThreshold: 0.5
+        preserveRecentMessages: 6
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024

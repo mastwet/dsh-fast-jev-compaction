@@ -10,6 +10,20 @@
 #
 # Everything before the group row is the shipped assembly; only the two backend
 # rows inside it change.
+#
+# The backend row carries NO Jev configuration and names the package's `engine`
+# entry, not the package root: the root is the plugin that registers the
+# `dsh-compaction-jev` settings namespace, so mounting it here would register
+# that namespace twice. Every value that decides how Jev behaves — including
+# whether it runs at all — lives in the namespace, so one place holds each value
+# and a change applies without a restart. `enabled` defaults to false: point a
+# preset at this row and the sessions using it still compact with the built-in
+# summary until Jev is turned on in Settings (or in `settings.yaml`).
+#
+# A preset lives outside the profile plane and resolves no bare package name.
+# There, address the entry by absolute URL instead:
+#
+#   file:///<profile>/node_modules/dsh-compaction-jev/lib/engine.js
 
 - id: compaction
   name: cordis:group
@@ -19,13 +33,7 @@
     toolResultPruner: true
   config:
     - id: compaction-jev
-      name: dsh-compaction-jev
-      config:
-        apiKeyEnv: TYPESAFE_API_KEY
-        model: jev-latest
-        minReductionRatio: 0.25
-        keepThreshold: 0.5
-        preserveRecentMessages: 6
+      name: 'dsh-compaction-jev/engine'
 
     - id: command-compact
       name: '@deepseek-ai/dsh-command-compact'

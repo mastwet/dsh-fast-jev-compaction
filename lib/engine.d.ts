@@ -12,16 +12,31 @@
  * The produced summary is not a rewritten summary. It is the region's retained
  * content, verbatim, with the items Jev released replaced by one-line notes.
  * When Jev is unavailable, fails, or releases too little, the hook delegates to
- * `super.summarize()`, which is the built-in model summary — the same fallback
- * the upstream Claude Code hook makes.
+ * `super.summarize()`, which is the built-in model summary.
+ *
+ * Every value that decides how the backend behaves lives in the
+ * `dsh-compaction-jev` settings namespace and is read on each compaction, so
+ * the Settings page changes behavior without a restart and the loader row
+ * carries no Jev configuration of its own.
+ *
+ * ## No ECMAScript private members
+ *
+ * A cordis service method is invoked with a *shadow* object as `this`
+ * (`vendor/cordis/src/utils.ts`, `createShadowMethod`): the shadow forwards
+ * ordinary property reads to the real instance, but it is a proxy and so has no
+ * ECMAScript private brand. A `#field` or `#method` reached through it throws
+ * `Cannot read private member #… from an object whose class did not declare it`
+ * — which is how `/compact` failed the first time this backend shipped, because
+ * the manual command enters the service from the host realm while the backend
+ * is composed in the agent preset's isolated group. Instance state therefore
+ * lives in ordinary properties (the base class does the same) and helpers that
+ * need no instance state are module-level functions.
  *
  * @module dsh-compaction-jev/engine
  */
-import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic';
 import { type ContentBlock, type Message, type TokenUsage, type ToolSchema } from '@deepseek-ai/dsh-llm';
-import { type JevCompactionConfig } from './config.js';
 /**
  * The summarizer hook's input, restated from
  * `@deepseek-ai/dsh-compaction-basic`'s `lib/types/summarizer.d.ts`.
@@ -58,25 +73,22 @@ export type SummaryResult = {
  * Compaction backend that keeps retained history verbatim and lets Jev decide
  * what is no longer needed.
  *
- * Load one implementation per context as `ctx.compaction`; the bundle patch
- * replaces the default backend's loader row by id.
+ * Load one implementation per context as `ctx.compaction`; an agent preset
+ * points its compaction row at this package.
  */
 export declare class JevCompactionEngine extends BasicCompactionEngine {
-    #private;
     static inject: string[];
-    static Config: typeof BasicCompactionEngine.Config;
-    /**
-     * @param ctx - the context the compaction service is provided on.
-     * @param config - the loader row's configuration: the base backend's own
-     * keys plus this plugin's `jev` block.
-     */
-    constructor(ctx: Context, config?: JevCompactionConfig);
+    /** Reported once per process, so a disabled namespace does not repeat per compaction. */
+    private reportedDisabled;
+    /** Reported once per process, so a missing credential does not repeat per compaction. */
+    private reportedMissingCredential;
     /**
      * Decide the region with Jev and render the checkpoint that keeps what it kept.
      *
-     * Delegates to the base backend's model summary whenever Jev cannot be asked
-     * or releases too little, so a deployment without a TypeSafe credential keeps
-     * compacting the way it did before this plugin was installed.
+     * Delegates to the base backend's model summary whenever the settings
+     * namespace is disabled, carries no usable credential, hides Jev, or Jev
+     * releases too little of the region, so compaction keeps working the way it
+     * did before this plugin was installed.
      *
      * @param input - the replayed conversation prefix the backend selected.
      * @param agent - supplies the routed model for the fallback summary.

@@ -45,6 +45,8 @@ Each of these falls back to the base backend's built-in model summary — the sa
 fallback the upstream Claude Code hook makes — so installing this plugin never
 makes compaction worse than it was, it only changes the decision source:
 
+- `enabled` is false, which is the default and also what a deployment with no
+  registered namespace resolves to;
 - `TYPESAFE_API_KEY` (or the configured variable) is unset;
 - the selected region contains an image, which has no text form to keep
   verbatim;
@@ -59,28 +61,52 @@ rather than quietly substituting a summary.
 
 ## Install
 
-The package is consumed by a DSH profile. Two wiring points exist because
-deployments place the compaction backend in different planes.
-
-### 1. A profile whose compaction row lives in the composition
-
-Use this when the profile's composed entry list contains the base bundle's
-`compaction-basic` row (a headless or custom profile). The package ships
-`cordis.patch.yml` for exactly this case:
+The package is consumed by a DSH profile:
 
 ```text
 dsh plugin --profile <profile> add <path-to-this-package>
 ```
 
-The patch **disables** the default backend's row and **inserts** this one. It
-cannot rename a row in place: in a patch entry, `name` is a guard that must match
-the target's current name, so changing a row's module means replacing the row.
+It exposes three entries, each mounted where the thing it provides is composed:
+
+| Entry | What it is | Where it is mounted |
+| --- | --- | --- |
+| `dsh-compaction-jev` (package root) | The plugin that registers the `dsh-compaction-jev` settings namespace. | This package's own `cordis.patch.yml`, on the host plane. |
+| `dsh-compaction-jev/engine` | The compaction backend. | Wherever compaction is composed; see below. |
+| `dsh-compaction-jev/client` | The Settings section that edits the namespace. | Discovered from the root entry; nothing to mount. |
+
+The root entry is what the Web client table resolves to this package, so the
+settings section is discoverable only while a root entry is mounted. A row naming
+a subpath registers its own half and is permanently not a client row.
 
 Set the credential before starting:
 
 ```text
-TYPESAFE_API_KEY=...        # or the variable named by jev.apiKeyEnv
+TYPESAFE_API_KEY=...        # or the variable named by the apiKeyEnv setting
 ```
+
+### 1. A profile whose compaction row lives in the composition
+
+Use this when the profile's composed entry list contains the base bundle's
+`compaction-basic` row (a headless or custom profile). The package's bundle patch
+mounts the settings plugin but deliberately does not mount the backend: a Web
+deployment composes compaction inside an agent preset, whose isolated realm a
+profile-level row cannot reach, and the shipped `dsh-web-app` layer disables the
+host-plane backend row.
+
+Add the backend row in the profile's own patch layer, beside the package's:
+
+```text
+- id: compaction-basic
+  disabled: true
+- insert:
+    - id: compaction-jev
+      name: 'dsh-compaction-jev/engine'
+```
+
+A patch entry cannot rename a row in place: `name` is a guard that must match the
+target's current name, so changing a row's module means disabling the old row and
+inserting a new one. Two mounted compaction backends in one composition fail.
 
 ### 2. A Web or Studio deployment, whose backend lives in an agent preset
 
@@ -98,9 +124,17 @@ ctx.agentPresets.copy('standard', 'jev')
 ```
 
 Then, in the copy's `agent.cordis.yml`, replace the `compaction` group's
-`compaction-basic` row with this package's row. `preset/compaction-jev.rows.yml`
-in this package is that group, ready to paste; it keeps the shipped
-`command-compact` and `tool-result-pruner` rows unchanged.
+`compaction-basic` row with this package's backend row.
+`preset/compaction-jev.rows.yml` in this package is that group, ready to paste;
+it keeps the shipped `command-compact` and `tool-result-pruner` rows unchanged.
+
+A preset lives outside the profile plane and resolves no bare package name, so
+address the backend by absolute URL there:
+
+```text
+- id: compaction-jev
+  name: 'file:///<profile>/node_modules/dsh-compaction-jev/lib/engine.js'
+```
 
 Do not disable the base row globally to achieve this: it is already disabled on
 the host plane, and the preset's copy is what the session resolves.
@@ -109,9 +143,9 @@ the host plane, and the preset's copy is what the session resolves.
 
 ```text
 pnpm install
-pnpm run build      # tsc -> lib/
+pnpm run build      # tsc -> lib/, then esbuild -> lib/client.js
 pnpm test           # node --test, no network
-pnpm run typecheck
+pnpm run typecheck  # host and browser halves
 ```
 
 The delivered tree contains no `node_modules`. `@deepseek-ai/cordis` and
@@ -122,28 +156,42 @@ a directory or a `pnpm pack` tarball rather than vendoring its dependencies.
 
 ## Configuration
 
-All fields are optional. The `jev` block is validated as part of this plugin's
-`Config` schema; the base backend's own fields (`thresholdRatio`,
-`retainRatio`, `retainTokens`, `modelPolicies`, `summarizationProvider`,
-`summarizationModel`, `maxTokens`, `compactionRetries`, `maxOverflowRetries`,
-`auto`) are declared by the base package and passed through unchanged.
+Every value that decides how Jev behaves lives in one place: the
+`dsh-compaction-jev` settings namespace, registered by the package root. The row
+that mounts the backend carries no Jev configuration, so there is no second copy
+to keep in step.
 
-| Key | Default | Meaning |
+On a Web or Studio deployment, edit the namespace in **Settings → Jev
+compaction** (this package's browser half registers that section). Elsewhere,
+write the same namespace into `settings.yaml`.
+
+| Field | Default | Meaning |
 | --- | --- | --- |
-| `jev.apiKeyEnv` | `TYPESAFE_API_KEY` | Environment variable holding the TypeSafe key. The value is never a config field. |
-| `jev.model` | `jev-latest` | Jev model name. |
-| `jev.baseUrl` | `https://api.typesafe.ai/v1/systemone` | System One endpoint. |
-| `jev.timeoutMs` | `60000` | Per-request timeout; composed with the harness's cancellation signal. |
-| `jev.minReductionRatio` | `0.25` | Minimum share of region characters the checkpoint must remove, else fall back. Clamped to `[0, 1]`. |
-| `jev.goal` | last three user prompts | Ongoing task description placed in the state. |
-| `jev.keepThreshold` | `0.5` | Minimum Jev probability for a call or result to stay. |
-| `jev.preserveRecentMessages` | `6` | Newest region messages never touched. The first region message is always pinned as well. |
-| `jev.maxStateTokens` | `25000` | Estimated ceiling for the state sent to Jev. |
-| `jev.maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions. |
-| `jev.truncateHeadChars` | `300` | Characters of a released tool result retained ahead of its note. |
+| `enabled` | `false` | Whether the backend may ask Jev at all. `false` runs the base backend's own summary unchanged. |
+| `keepThreshold` | `0.5` | Minimum Jev probability for a call or result to stay. |
+| `preserveRecentMessages` | `6` | Newest region messages never touched; the first region message is always pinned as well. |
+| `minReductionRatio` | `0.25` | Minimum share of region characters the checkpoint must remove, else fall back. Clamped to `[0, 1]`. |
+| `truncateHeadChars` | `300` | Characters of a released tool result retained ahead of its note. |
+| `model` | `jev-latest` | Jev model name. |
+| `apiKeyEnv` | `TYPESAFE_API_KEY` | Environment variable holding the TypeSafe key. The credential itself is never a settings field. |
+| `baseUrl` | `https://api.typesafe.ai/v1/systemone` | System One endpoint. |
+| `timeoutMs` | `60000` | Per-request timeout; composed with the harness's cancellation signal. |
+| `maxStateTokens` | `25000` | Estimated ceiling for the state sent to Jev. |
+| `maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions. |
+| `goal` | empty | Ongoing task description placed in the state; empty uses the last three user prompts. |
 
 Raising `keepThreshold` releases more; raising `minReductionRatio` makes the
 backend fall back to a plain summary more often.
+
+`enabled` defaults to false, and so does a deployment that never registers the
+namespace, so installing this package changes no compaction behavior until
+someone turns Jev on. Values are read at each compaction, so a change applies to
+the next one without a restart.
+
+The base backend's own fields (`thresholdRatio`, `retainRatio`, `retainTokens`,
+`modelPolicies`, `summarizationProvider`, `summarizationModel`, `maxTokens`,
+`compactionRetries`, `maxOverflowRetries`, `auto`) stay on the backend row, where
+the base package's schema validates them.
 
 ## Guarantees
 
@@ -191,13 +239,19 @@ backend fall back to a plain summary more often.
 
 | Path | Contents |
 | --- | --- |
+| `src/index.ts` | The package root: the plugin that registers the settings namespace. |
 | `src/engine.ts` | `JevCompactionEngine`: the `summarize()` override and its fallbacks. |
 | `src/surface.ts` | DSH `Message[]` ↔ Jev projection and checkpoint rendering. |
 | `src/jev/protocol.ts` | System One request/response shape and the HTTP client. |
 | `src/jev/plan.ts` | Pairing, pinning, state fitting, batching, and decisions. |
 | `src/jev/tokens.ts` | The token estimator and text bounding. |
-| `src/config.ts` | The `jev` schema, merged with the base backend's own fields. |
-| `cordis.patch.yml` | Bundle patch for a profile-level install. |
+| `src/settings/fields.ts` | The field table: every key, default, type, and bound. |
+| `src/settings/schema.ts` | The namespace schema, built from that table. |
+| `src/settings/form.ts` | Draft, validation, and write planning behind the page. |
+| `src/settings/locales.ts` | The `settings.jev` display text, keyed by field. |
+| `src/client/` | The Settings section: component, styles, and registration. |
+| `scripts/build-client.mjs` | The esbuild build of the browser half. |
+| `cordis.patch.yml` | Bundle patch: mounts the root plugin on the host plane. |
 | `preset/compaction-jev.rows.yml` | The compaction group for a user-owned preset. |
 | `test/` | `node --test` suite; the transport is stubbed, no network. |
 

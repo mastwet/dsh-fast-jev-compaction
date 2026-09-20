@@ -1,38 +1,27 @@
-# dsh-compaction-jev bundle patch: replace the host-plane compaction backend.
+# dsh-compaction-jev bundle patch: mount this package's root plugin, which owns
+# the settings namespace every Jev value lives in.
 #
-# A patch entry targets a row by id and REPLACES that row's whole `config`.
-# `name` in a patch entry is a guard, not an override: it must match the row's
-# current name or the patch is skipped with a warning. So the default backend is
-# disabled, and this backend is inserted as its own row.
+# The row names the PACKAGE ROOT, not a subpath, and that is load-bearing. The
+# Web client table maps loader entries to packages by module specifier and treats
+# a subpath entry as permanently not a client row, so a `dsh-compaction-jev/...`
+# row would mount the host half while leaving the Settings page undiscoverable.
 #
-# Wiring for a profile whose compaction row lives in the composition:
+# The compaction backend is NOT wired here, and that too is deliberate. A Web
+# deployment composes compaction inside an agent preset's isolated group and the
+# shipped `dsh-web-app` layer disables the host-plane backend row, so adding a
+# host-plane backend row here would populate a service the profile suppressed.
+# The wiring point for a Web deployment is a user-owned preset copy, which mounts
+# `dsh-compaction-jev/engine`; see README.md and preset/compaction-jev.rows.yml.
+#
+# This row only registers the settings namespace, which the backend reads through
+# the host's single settings provider. `enabled` defaults to false, so mounting
+# this patch changes no compaction behavior until a user turns Jev on in
+# Settings.
+#
+# Install with:
 #
 #   dsh plugin --profile <name> add <path-to-this-package>
-#
-# The `/compact` command and the tool-result pruner resolve whichever
-# `compaction` service their realm provides, so neither needs an entry here.
-#
-# A Web deployment composes compaction inside an agent preset's isolated group
-# instead (the shipped `dsh-web-app` layer disables the host-plane row), so
-# there the wiring point is a user-owned preset copy. See README.md.
-
-- id: compaction-basic
-  disabled: true
 
 - insert:
-    - id: compaction-jev
-      name: dsh-compaction-jev
-      config:
-        # The credential is never a config value; this names the environment
-        # variable that holds it.
-        apiKeyEnv: TYPESAFE_API_KEY
-        model: jev-latest
-        # A minimum share of the region must be released before the verbatim
-        # checkpoint is used; below it the backend falls back to the built-in
-        # model summary. Raise it to prefer summaries, lower it to accept
-        # smaller reductions.
-        minReductionRatio: 0.25
-        # Minimum Jev probability for a call or a result to stay.
-        keepThreshold: 0.5
-        # Newest region messages never scored; the first is always pinned.
-        preserveRecentMessages: 6
+    - id: compaction-jev-settings
+      name: 'dsh-compaction-jev'

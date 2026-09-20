@@ -12,8 +12,25 @@
  * The produced summary is not a rewritten summary. It is the region's retained
  * content, verbatim, with the items Jev released replaced by one-line notes.
  * When Jev is unavailable, fails, or releases too little, the hook delegates to
- * `super.summarize()`, which is the built-in model summary — the same fallback
- * the upstream Claude Code hook makes.
+ * `super.summarize()`, which is the built-in model summary.
+ *
+ * Every value that decides how the backend behaves lives in the
+ * `dsh-compaction-jev` settings namespace and is read on each compaction, so
+ * the Settings page changes behavior without a restart and the loader row
+ * carries no Jev configuration of its own.
+ *
+ * ## No ECMAScript private members
+ *
+ * A cordis service method is invoked with a *shadow* object as `this`
+ * (`vendor/cordis/src/utils.ts`, `createShadowMethod`): the shadow forwards
+ * ordinary property reads to the real instance, but it is a proxy and so has no
+ * ECMAScript private brand. A `#field` or `#method` reached through it throws
+ * `Cannot read private member #… from an object whose class did not declare it`
+ * — which is how `/compact` failed the first time this backend shipped, because
+ * the manual command enters the service from the host realm while the backend
+ * is composed in the agent preset's isolated group. Instance state therefore
+ * lives in ordinary properties (the base class does the same) and helpers that
+ * need no instance state are module-level functions.
  *
  * @module dsh-compaction-jev/engine
  */
@@ -29,17 +46,26 @@ import {
   type TokenUsage,
   type ToolSchema,
 } from '@deepseek-ai/dsh-llm'
+// Loads the declaration merging that puts `settings` on `Context`. The
+// namespace is optional: a deployment without a settings provider resolves the
+// field defaults, whose `enabled` is false.
+import type {} from '@deepseek-ai/dsh-settings'
 // Loads the declaration merging that puts `tokenMeter` on `Context`. The
 // backend is composed only in deployments that mount a meter, and the base
 // package it subclasses carries the same requirement.
 import type {} from '@deepseek-ai/dsh-token-meter'
-import { JevCompactionConfigSchema, resolveJevConfig, type JevCompactionConfig, type ResolvedJevConfig } from './config.js'
+import {
+  JEV_SETTINGS_NAMESPACE,
+  resolveJevSettings,
+  type JevSettings,
+} from './settings/fields.js'
 import {
   batchCalls,
   collectToolCalls,
   decideCall,
   fitState,
   questionsFor,
+  resolveJevOptions,
   type CallAnswer,
   type CallDecision,
   type ToolCall,
@@ -93,12 +119,24 @@ function messageOf(error: unknown): string {
 }
 
 /**
+ * Read the settings namespace from whatever provider the host mounted.
+ * @param ctx - the context the backend was composed on.
+ * @returns every field resolved, defaulting to `enabled: false` when no
+ * provider registered the namespace.
+ */
+function readSettings(ctx: Context): JevSettings {
+  const provider = ctx.get('settings') as Context['settings'] | undefined
+  return resolveJevSettings(provider?.get(JEV_SETTINGS_NAMESPACE))
+}
+
+/**
  * Ask one batch of questions and reduce its answers to per-call probabilities.
  * @param asker - the Jev transport.
  * @param state - the fitted conversation state, resent with every batch.
  * @param batch - the calls this batch asks about.
  * @param signal - caller cancellation, forwarded to the transport.
- * @returns one answer pair per call in the batch.
+ * @returns one answer pair per call in the batch, and the model the provider
+ * reported when it named one.
  * @throws when the transport fails or an answer is malformed.
  */
 async function askBatch(
@@ -106,68 +144,117 @@ async function askBatch(
   state: JevState,
   batch: readonly ToolCall[],
   signal?: AbortSignal,
-): Promise<Map<string, CallAnswer>> {
+): Promise<{ answers: Map<string, CallAnswer>; model: string | undefined }> {
   const questions: JevQuestions = Object.assign({}, ...batch.map(questionsFor))
   const response: JevResponse = await asker.ask(state, questions, signal)
-  return new Map(
-    batch.map((call) => [
-      call.id,
-      {
-        keepCall: noulAnswer(response.answers, `call_${call.id}`),
-        keepResult: noulAnswer(response.answers, `result_${call.id}`),
-      } satisfies CallAnswer,
-    ]),
+  return {
+    answers: new Map(
+      batch.map((call) => [
+        call.id,
+        {
+          keepCall: noulAnswer(response.answers, `call_${call.id}`),
+          keepResult: noulAnswer(response.answers, `result_${call.id}`),
+        } satisfies CallAnswer,
+      ]),
+    ),
+    model: response.model,
+  }
+}
+
+/** One decided region: the checkpoint content and the model that decided it. */
+interface Decision {
+  rendered: RenderOutput
+  model: string | undefined
+}
+
+/**
+ * Pair, fit, ask, decide, and render one region. Module-level because a shadow
+ * cannot reach an instance helper.
+ * @param region - the conversation prefix this compaction replaces.
+ * @param settings - the resolved namespace section the compaction obeys.
+ * @param apiKey - the credential read from the environment variable the section names.
+ * @param signal - cancellation, forwarded to every Jev request.
+ * @returns the checkpoint content and the model the provider reported, if any.
+ * @throws when the region cannot be fitted into the state ceiling or when Jev
+ * cannot be reached or answered.
+ */
+async function decideRegion(
+  region: readonly Message[],
+  settings: JevSettings,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<Decision> {
+  const options = resolveJevOptions(settings)
+  const asker = new JevHttpClient({
+    apiKey,
+    model: settings.model,
+    baseUrl: settings.baseUrl,
+    timeoutMs: settings.timeoutMs,
+  })
+  const messages = projectMessages(region)
+  const calls = collectToolCalls(messages, options.preserveRecentMessages)
+  const candidates = calls.filter((call) => !call.pinned)
+  const answers = new Map<string, CallAnswer>()
+  let model: string | undefined
+  let stateTokens = 0
+  let stateStage = ''
+  let requests = 0
+
+  if (candidates.length > 0) {
+    const fitted = fitState(messages, calls, options)
+    stateTokens = fitted.tokens
+    stateStage = fitted.stage
+    const batches = batchCalls(candidates, fitted.tokens, options)
+    requests = batches.length
+    const answered = await Promise.all(
+      batches.map((batch) => askBatch(asker, fitted.state, batch, signal)),
+    )
+    for (const one of answered) {
+      model ??= one.model
+      for (const [id, answer] of one.answers) answers.set(id, answer)
+    }
+  }
+
+  const decisions: CallDecision[] = calls.map((call) =>
+    decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, options),
   )
+  return {
+    rendered: renderRegion({
+      messages: region,
+      calls,
+      decisions,
+      truncateHeadChars: options.truncateHeadChars,
+      stateStage: stateStage.length > 0 ? stateStage : 'no candidates',
+      stateTokens,
+      requests,
+    }),
+    model,
+  }
 }
 
 /**
  * Compaction backend that keeps retained history verbatim and lets Jev decide
  * what is no longer needed.
  *
- * Load one implementation per context as `ctx.compaction`; the bundle patch
- * replaces the default backend's loader row by id.
+ * Load one implementation per context as `ctx.compaction`; an agent preset
+ * points its compaction row at this package.
  */
 export class JevCompactionEngine extends BasicCompactionEngine {
   static override inject = BasicCompactionEngine.inject
 
-  static override Config = JevCompactionConfigSchema as unknown as typeof BasicCompactionEngine.Config
+  /** Reported once per process, so a disabled namespace does not repeat per compaction. */
+  private reportedDisabled = false
 
-  readonly #jev: ResolvedJevConfig
-  #asker: JevAsker | undefined
-  #warnedMissingCredential = false
-
-  /**
-   * @param ctx - the context the compaction service is provided on.
-   * @param config - the loader row's configuration: the base backend's own
-   * keys plus this plugin's `jev` block.
-   */
-  constructor(ctx: Context, config: JevCompactionConfig = {}) {
-    // The base backend validates its config against a fixed key set, so the
-    // `jev` block is removed before it is handed the base keys it knows. The
-    // Loader still sees the whole object: it validates against this class's
-    // merged `Config`.
-    const { jev, ...base } = config
-    super(ctx, base)
-    this.#jev = resolveJevConfig(jev)
-  }
-
-  /** The Jev transport, created on first use so an unconfigured deployment never builds one. */
-  #client(): JevAsker {
-    this.#asker ??= new JevHttpClient({
-      apiKey: this.#jev.apiKey ?? '',
-      model: this.#jev.model,
-      baseUrl: this.#jev.baseUrl,
-      timeoutMs: this.#jev.timeoutMs,
-    })
-    return this.#asker
-  }
+  /** Reported once per process, so a missing credential does not repeat per compaction. */
+  private reportedMissingCredential = false
 
   /**
    * Decide the region with Jev and render the checkpoint that keeps what it kept.
    *
-   * Delegates to the base backend's model summary whenever Jev cannot be asked
-   * or releases too little, so a deployment without a TypeSafe credential keeps
-   * compacting the way it did before this plugin was installed.
+   * Delegates to the base backend's model summary whenever the settings
+   * namespace is disabled, carries no usable credential, hides Jev, or Jev
+   * releases too little of the region, so compaction keeps working the way it
+   * did before this plugin was installed.
    *
    * @param input - the replayed conversation prefix the backend selected.
    * @param agent - supplies the routed model for the fallback summary.
@@ -179,12 +266,23 @@ export class JevCompactionEngine extends BasicCompactionEngine {
     agent: Agent,
     signal?: AbortSignal,
   ): Promise<SummaryResult> {
-    const jev = this.#jev
-    if (jev.apiKey === undefined) {
-      if (!this.#warnedMissingCredential) {
-        this.#warnedMissingCredential = true
+    const settings = readSettings(this.ctx)
+    if (!settings.enabled) {
+      if (!this.reportedDisabled) {
+        this.reportedDisabled = true
+        this.ctx.logger.info(
+          `dsh-compaction-jev: disabled in the "${JEV_SETTINGS_NAMESPACE}" settings; using the built-in summary`,
+        )
+      }
+      return super.summarize(input, agent, signal)
+    }
+
+    const apiKey = process.env[settings.apiKeyEnv]
+    if (apiKey === undefined || apiKey.length === 0) {
+      if (!this.reportedMissingCredential) {
+        this.reportedMissingCredential = true
         this.ctx.logger.warn(
-          `dsh-compaction-jev: ${jev.apiKeyEnv} is not set; using the built-in summary`,
+          `dsh-compaction-jev: enabled, but ${settings.apiKeyEnv} is not set; using the built-in summary`,
         )
       }
       return super.summarize(input, agent, signal)
@@ -202,9 +300,9 @@ export class JevCompactionEngine extends BasicCompactionEngine {
       return super.summarize(input, agent, signal)
     }
 
-    let rendered: ReturnType<typeof renderRegion>
+    let decision: Decision
     try {
-      rendered = await this.#decide(region, signal)
+      decision = await decideRegion(region, settings, apiKey, signal)
     } catch (error) {
       if (signal?.aborted === true) throw error
       this.ctx.logger.warn(
@@ -213,6 +311,7 @@ export class JevCompactionEngine extends BasicCompactionEngine {
       return super.summarize(input, agent, signal)
     }
 
+    const rendered = decision.rendered
     const meter = this.ctx.tokenMeter
     const before = region.reduce((sum, message) => sum + meter.estimateMessage(message), 0)
     const after = meter.estimateMessage(
@@ -223,7 +322,7 @@ export class JevCompactionEngine extends BasicCompactionEngine {
     )
     const reduction =
       rendered.charsBefore === 0 ? 0 : (rendered.charsBefore - rendered.charsAfter) / rendered.charsBefore
-    if (after >= before || reduction < jev.minReductionRatio) {
+    if (after >= before || reduction < settings.minReductionRatio) {
       this.ctx.logger.info(
         `dsh-compaction-jev: Jev released ${(reduction * 100).toFixed(1)}% of the region (~${before} → ~${after} tokens), below the configured floor; using the built-in summary`,
       )
@@ -233,45 +332,11 @@ export class JevCompactionEngine extends BasicCompactionEngine {
     this.ctx.logger.info(
       `dsh-compaction-jev: kept history verbatim over ${rendered.blocks.length} block(s), releasing ${(reduction * 100).toFixed(1)}% of ${region.length} message(s) (~${before} → ~${after} tokens)`,
     )
-    return { summary: rendered.blocks, provider: JEV_PROVIDER, model: jev.model }
-  }
-
-  /** Pair, fit, ask, decide, and render one region. */
-  async #decide(region: readonly Message[], signal?: AbortSignal): Promise<RenderOutput> {
-    const options = this.#jev.options
-    const messages = projectMessages(region)
-    const calls = collectToolCalls(messages, options.preserveRecentMessages)
-    const candidates = calls.filter((call) => !call.pinned)
-    const answers = new Map<string, CallAnswer>()
-    let stateTokens = 0
-    let stateStage = ''
-    let requests = 0
-
-    if (candidates.length > 0) {
-      const fitted = fitState(messages, calls, options)
-      stateTokens = fitted.tokens
-      stateStage = fitted.stage
-      const batches = batchCalls(candidates, fitted.tokens, options)
-      requests = batches.length
-      const asker = this.#client()
-      const answered = await Promise.all(
-        batches.map((batch) => askBatch(asker, fitted.state, batch, signal)),
-      )
-      for (const map of answered) for (const [id, answer] of map) answers.set(id, answer)
+    return {
+      summary: rendered.blocks,
+      provider: JEV_PROVIDER,
+      model: decision.model ?? settings.model,
     }
-
-    const decisions: CallDecision[] = calls.map((call) =>
-      decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, options),
-    )
-    return renderRegion({
-      messages: region,
-      calls,
-      decisions,
-      truncateHeadChars: options.truncateHeadChars,
-      stateStage: stateStage.length > 0 ? stateStage : 'no candidates',
-      stateTokens,
-      requests,
-    })
   }
 }
 
